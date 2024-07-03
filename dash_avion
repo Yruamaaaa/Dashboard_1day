@@ -1,0 +1,248 @@
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from dash import Dash, html, dcc
+from datetime import datetime
+
+df = pd.read_csv('DelayedFlights.csv')
+df_cleaned = df.dropna()
+df.rename(columns={'DayofMonth': 'Day'}, inplace=True)
+df['Date'] = pd.to_datetime(df[['Year', 'Month', 'Day']])
+columns_to_drop = ['Unnamed: 0', 'Year', 'Month', 'Day', 'CRSDepTime', 'CRSArrTime', 'TaxiIn', 'TaxiOut']
+df.drop(columns=columns_to_drop, inplace=True, errors='ignore')
+
+def convert_to_time_format(time_series):
+    time_series = time_series.astype(str).str.split('.').str[0].str.zfill(4)
+    return pd.to_datetime(time_series, format='%H%M', errors='coerce').dt.time
+
+df['DepTime'] = convert_to_time_format(df['DepTime'])
+df['ArrTime'] = convert_to_time_format(df['ArrTime'])
+df.dropna(subset=['DepTime', 'ArrTime'], inplace=True)
+
+columns_to_fill = ['Cancelled', 'CancellationCode', 'Diverted', 'CarrierDelay', 'WeatherDelay', 'NASDelay', 'SecurityDelay', 'LateAircraftDelay']
+df[columns_to_fill] = df[columns_to_fill].fillna(0)
+df.drop(columns=['CancellationCode'], inplace=True, errors='ignore')
+
+df['DepHourMin'] = pd.to_datetime(df['DepTime'], format='%H:%M:%S').dt.floor('30T').dt.strftime('%H:%M')
+df['Delayed'] = df['ArrDelay'] > 15
+delayed_flights = df[df['Delayed']]
+ordered_intervals = pd.date_range("00:00", "23:30", freq="30T").strftime('%H:%M').tolist()
+
+# Histogram
+fig_hist = px.histogram(delayed_flights, x='DepHourMin', y='Delayed', histfunc='count',
+                        labels={'DepHourMin': 'Time of Day (30-minute intervals)', 'Delayed': 'Number of Delayed Flights'},
+                        title='Number of Flights Delayed by More Than 15 Minutes by Time of Day',
+                        category_orders={"DepHourMin": ordered_intervals})
+fig_hist.update_layout(
+    bargap=0.2,
+    xaxis=dict(
+        tickmode='array',
+        tickvals=[0, len(ordered_intervals)//5, len(ordered_intervals)*2//5, len(ordered_intervals)*3//5, len(ordered_intervals)*4//5, len(ordered_intervals)-1],
+        ticktext=[ordered_intervals[0], ordered_intervals[len(ordered_intervals)//5], ordered_intervals[len(ordered_intervals)*2//5], ordered_intervals[len(ordered_intervals)*3//5], ordered_intervals[len(ordered_intervals)*4//5], ordered_intervals[-1]],
+        gridcolor='gray'
+    ),
+    yaxis=dict(
+        gridcolor='gray'
+    ),
+    plot_bgcolor='#2c2c2c',
+    paper_bgcolor='#2c2c2c',
+    font=dict(color='white', family='Lato')
+)
+fig_hist.update_traces(marker_color='#7631E8')
+
+# Heatmap
+df['Day'] = df['Date'].dt.day
+df['Month'] = df['Date'].dt.month
+delayed_flights_by_day = df[df['Delayed']].groupby(['Month', 'Day']).size().reset_index(name='Number of Delayed Flights')
+fig_heatmap = px.density_heatmap(delayed_flights_by_day, x='Day', y='Month', z='Number of Delayed Flights',
+                                 labels={'Day': 'Day of the Month', 'Month': 'Month', 'Number of Delayed Flights': 'Delayed Flights'},
+                                 title='Number of Flights Delayed by More Than 15 Minutes by Date',
+                                 nbinsx=31, nbinsy=12)
+fig_heatmap.update_yaxes(tickmode='linear')
+fig_heatmap.update_layout(
+    plot_bgcolor='#2c2c2c', 
+    paper_bgcolor='#2c2c2c', 
+    font=dict(color='white')
+)
+
+# Scatter Plot
+distance_bins = pd.cut(df['Distance'], bins=range(0, 5001, 100))
+df['DistanceBins'] = distance_bins.astype(str)
+mean_delays = df.groupby('DistanceBins')['ArrDelay'].mean().reset_index()
+mean_delays['DistanceBins'] = pd.Categorical(mean_delays['DistanceBins'], categories=distance_bins.cat.categories.astype(str), ordered=True)
+mean_delays = mean_delays.sort_values('DistanceBins')
+fig_scatter = px.scatter(mean_delays, x='DistanceBins', y='ArrDelay',
+                         labels={'DistanceBins': 'Distance (miles)', 'ArrDelay': 'Average Arrival Delay (minutes)'},
+                         title='Average Arrival Delay by Distance Bins')
+fig_scatter.update_layout(
+    xaxis=dict(
+        tickmode='array',
+        tickvals=[0, len(mean_delays['DistanceBins'])//5, len(mean_delays['DistanceBins'])*2//5, len(mean_delays['DistanceBins'])*3//5, len(mean_delays['DistanceBins'])*4//5, len(mean_delays['DistanceBins'])-1],
+        ticktext=[mean_delays['DistanceBins'][0], mean_delays['DistanceBins'][len(mean_delays['DistanceBins'])//5], mean_delays['DistanceBins'][len(mean_delays['DistanceBins'])*2//5], mean_delays['DistanceBins'][len(mean_delays['DistanceBins'])*3//5], mean_delays['DistanceBins'][len(mean_delays['DistanceBins'])*4//5], mean_delays['DistanceBins'].tolist()[-1]],
+        gridcolor='gray'
+    ),
+    yaxis=dict(
+        gridcolor='gray'
+    ),
+    plot_bgcolor='#2c2c2c',
+    paper_bgcolor='#2c2c2c',
+    font=dict(color='white', family='Lato')
+)
+fig_scatter.update_traces(marker=dict(color='#FAA015'))
+
+
+# Horizontal Bar Chart
+delay_columns = ['CarrierDelay', 'WeatherDelay', 'NASDelay', 'SecurityDelay', 'LateAircraftDelay']
+df[delay_columns] = df[delay_columns].fillna(0)
+total_delays = df[delay_columns].sum().reset_index()
+total_delays.columns = ['DelayReason', 'TotalDelay']
+total_delays = total_delays.sort_values(by='TotalDelay', ascending=False)
+fig_bar = px.bar(total_delays, y='DelayReason', x='TotalDelay',
+                 labels={'DelayReason': 'Reason for Delay', 'TotalDelay': 'Total Delay (minutes)'},
+                 title='Total Delay by Reason', text='TotalDelay', orientation='h')
+fig_bar.update_layout(
+    yaxis={'categoryorder': 'total ascending'}, 
+    xaxis_title='Total Delay (minutes)',
+    plot_bgcolor='#2c2c2c', 
+    paper_bgcolor='#2c2c2c', 
+    font=dict(color='white', family='Lato'), 
+)
+fig_bar.update_traces(marker_color='#502B8D')
+
+# Pie Chart
+airline_names = {'WN': 'Southwest Airlines', 'XE': 'ExpressJet Airlines', 'YV': 'Mesa Airlines', 'OH': 'PSA Airlines',
+                 'OO': 'SkyWest Airlines', 'UA': 'United Airlines', 'US': 'US Airways', 'DL': 'Delta Air Lines',
+                 'EV': 'ExpressJet Airlines', 'F9': 'Frontier Airlines', 'FL': 'AirTran Airways', 'HA': 'Hawaiian Airlines',
+                 'MQ': 'Envoy Air', 'NW': 'Northwest Airlines', '9E': 'Endeavor Air', 'AA': 'American Airlines',
+                 'AQ': 'Aloha Airlines', 'AS': 'Alaska Airlines', 'B6': 'JetBlue Airways', 'CO': 'Continental Airlines'}
+df['AirlineName'] = df['UniqueCarrier'].map(airline_names)
+df['TotalDelay'] = df[['CarrierDelay', 'WeatherDelay', 'NASDelay', 'SecurityDelay', 'LateAircraftDelay']].sum(axis=1)
+total_delays_by_airline = df.groupby('AirlineName')['TotalDelay'].sum().reset_index()
+fig_pie = px.pie(total_delays_by_airline, values='TotalDelay', names='AirlineName',
+                 title='Airlines with the Most Total Delays',
+                 labels={'TotalDelay': 'Total Delay (minutes)', 'AirlineName': 'Airline'})
+fig_pie.update_layout(
+    plot_bgcolor='#2c2c2c', 
+    paper_bgcolor='#2c2c2c', 
+    font=dict(color='white', family='Lato')
+)
+
+# Parallel Coordinates Plot
+df['Month'] = df['Month'].fillna(0).astype(int)
+columns_to_plot = ['AirTime', 'DepDelay', 'ArrDelay', 'Distance', 'Month']
+df = df[columns_to_plot].dropna()
+df_subset = df.sample(n=1000, random_state=42)
+dimensions = [
+    dict(range=[df_subset['AirTime'].min(), df_subset['AirTime'].max()],
+         label='Air Time (minutes)', values=df_subset['AirTime']),
+    dict(range=[df_subset['DepDelay'].min(), df_subset['DepDelay'].max()],
+         label='Departure Delay (minutes)', values=df_subset['DepDelay']),
+    dict(range=[df_subset['ArrDelay'].min(), df_subset['ArrDelay'].max()],
+         label='Arrival Delay (minutes)', values=df_subset['ArrDelay']),
+    dict(range=[df_subset['Distance'].min(), df_subset['Distance'].max()],
+         label='Distance (miles)', values=df_subset['Distance']),
+    dict(range=[df_subset['Month'].min(), df_subset['Month'].max()],
+         label='Month', values=df_subset['Month'])
+]
+fig_parallel = go.Figure(data=go.Parcoords(
+    line=dict(color=df_subset['ArrDelay'], colorscale='Tealrose', showscale=True,
+              cmin=df_subset['ArrDelay'].min(), cmax=df_subset['ArrDelay'].max()),
+    dimensions=dimensions
+))
+fig_parallel.update_layout(
+    title='Parallel Coordinates Plot of Flight Delays and Characteristics', 
+    plot_bgcolor='#2c2c2c', 
+    paper_bgcolor='#2c2c2c', 
+    font=dict(color='white', family='Lato')
+)
+
+# Unit Chart
+df = pd.read_csv('DelayedFlights.csv')
+df_cleaned = df.dropna()
+df.rename(columns={'DayofMonth': 'Day'}, inplace=True)
+df['IsDelayed'] = df['ArrDelay'] > 0
+df['Date'] = pd.to_datetime(df[['Year', 'Month', 'Day']])  
+delayed_flights_by_date = df.groupby('Date')['IsDelayed'].sum().reset_index()
+fig_unit = px.scatter(delayed_flights_by_date, x='Date', y='IsDelayed',
+                      size='IsDelayed', size_max=10,
+                      labels={'Date': 'Date', 'IsDelayed': 'Number of Delayed Flights'},
+                      title='Number of Delayed Flights Over Time',
+                      color='IsDelayed', color_continuous_scale=px.colors.sequential.Viridis)
+fig_unit.update_layout(
+    xaxis=dict(
+        gridcolor='gray'  
+    ),
+    yaxis=dict(
+        gridcolor='gray'  
+    ),
+    xaxis_title='Date', 
+    yaxis_title='Number of Delayed Flights', 
+    showlegend=False,
+    plot_bgcolor='#2c2c2c',
+    paper_bgcolor='#2c2c2c',
+    font=dict(color='white', family='Lato')
+)
+
+external_stylesheets = [
+    'https://fonts.googleapis.com/css2?family=Lato:wght@400&display=swap',
+    'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css'
+]
+
+app = Dash(__name__, external_stylesheets=external_stylesheets)
+
+app.layout = html.Div(style={'backgroundColor': '#252525', 'color': '#502B8D','fontFamily': 'Lato'}, children=[
+
+    html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'padding': '10px', 'backgroundColor': '#252525'}, children=[
+        html.H1(children='Flight Delay 2008 U.S', style={'color': '#502B8D','marginLeft': '90px'}),
+        html.Div(style={'display': 'flex', 'alignItems': 'center'}, children=[
+            html.Div(html.I(className='fas fa-save fa-2x'), style={'marginRight': '10px', 'cursor': 'pointer'}),
+            html.Div(html.I(className='fas fa-camera fa-2x'), style={'cursor': 'pointer'})
+        ])
+    ]),
+
+    html.Div(style={
+        'width': '60px', 
+        'backgroundColor': '#2c2c2c', 
+        'padding': '10px', 
+        'position': 'fixed', 
+        'top': '0', 
+        'bottom': '0', 
+        'display': 'flex', 
+        'flexDirection': 'column', 
+        'alignItems': 'center', 
+        'justifyContent': 'space-between'
+    }, children=[
+        html.Div(children=[
+            html.Div(html.I(className='fas fa-home fa-2x'), style={'margin': '10px 0'}),
+            html.Div(html.I(className='fas fa-bell fa-2x'), style={'margin': '10px 0'}),
+            html.Div(html.I(className='fas fa-cogs fa-2x'), style={'margin': '10px 0'}),
+        ]),
+        html.Div(html.I(className='fas fa-question-circle fa-2x'), style={'margin': '20px 0'}),
+    ]),
+    
+    # Main Content
+    html.Div(style={'flex': '1','marginLeft': '55px', 'backgroundColor': '#252525'}, children=[
+
+    # First row
+    html.Div([
+        html.Div(dcc.Graph(id='histogram', figure=fig_hist), style={'flex': '1', 'margin': '2px', 'maxWidth': '33%'}),
+        html.Div(dcc.Graph(id='heatmap', figure=fig_heatmap), style={'flex': '1', 'margin': '2px', 'maxWidth': '33%'}),
+        html.Div(dcc.Graph(id='scatter', figure=fig_scatter), style={'flex': '1', 'margin': '2px', 'maxWidth': '32%'})
+    ], style={'display': 'flex', 'flexWrap': 'nowrap', 'justifyContent': 'space-around'}),
+    
+    # Second row
+    html.Div([
+        html.Div(dcc.Graph(id='parallel', figure=fig_parallel), style={'flex': '2', 'margin': '2px', 'maxWidth': '49%'}),
+        html.Div(dcc.Graph(id='pie', figure=fig_pie), style={'flex': '1', 'margin': '2px', 'maxWidth': '25%'}),
+        html.Div(dcc.Graph(id='bar', figure=fig_bar), style={'flex': '1', 'margin': '2px', 'maxWidth': '24%'})
+    ], style={'display': 'flex', 'flexWrap': 'nowrap', 'justifyContent': 'space-around'}),
+    
+    # Third row
+    html.Div([
+        dcc.Graph(id='unit', figure=fig_unit, style={'width': '100%', 'margin': '2px'})
+    ], style={'display': 'flex', 'flexWrap': 'nowrap', 'justifyContent': 'center', 'margin': '1px'})
+    ])
+])
+
+if __name__ == '__main__':
+    app.run_server(debug=True)
